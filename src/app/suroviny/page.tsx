@@ -1,6 +1,7 @@
+/* eslint-disable @next/next/no-img-element */
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabaseClient";
 
@@ -14,163 +15,114 @@ type Ingredient = {
   fat: number;
 };
 
-function canon(s: string | null | undefined) {
-  return (s ?? "").trim().replace(/\s+/g, " ").toLowerCase();
-}
-function hasVendor(i: Pick<Ingredient, "vendor">) {
-  return canon(i.vendor).length > 0;
-}
-function keyByNameVendor(i: Pick<Ingredient, "name" | "vendor">) {
-  return `${canon(i.name)}|${canon(i.vendor)}`;
-}
-
 export default function SurovinyPage() {
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   const [userId, setUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [list, setList] = useState<Ingredient[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
 
-  // info počty z DB (ne po sloučení)
-  const [publicCount, setPublicCount] = useState(0);
-  const [ownCount, setOwnCount] = useState(0);
-
-  // form
-  const [form, setForm] = useState({ name: "", vendor: "", protein: "", carbs: "", fat: "" });
+  // form (create / edit)
+  const [form, setForm] = useState({
+    name: "",
+    vendor: "",
+    protein: "",
+    carbs: "",
+    fat: "",
+  });
   const [editId, setEditId] = useState<string | null>(null);
 
-  useEffect(() => {
-    let unsub: (() => void) | undefined;
+  // Pomocná: bezpečný parse (povolí i "20,5")
+  const parseNum = (s: string) => {
+    const v = s.replace(/\s+/g, "").replace(",", ".");
+    const n = Number.parseFloat(v);
+    return Number.isFinite(n) ? n : NaN;
+  };
 
+  // Deduplikace (pokud je stejný název a jednou je vendor a podruhé není, necháme ten s vendorem)
+  function dedupe(arr: Ingredient[]) {
+    const byKey = new Map<string, Ingredient>();
+    for (const it of arr) {
+      const key = it.name.trim().toLowerCase();
+      const prev = byKey.get(key);
+      if (!prev) {
+        byKey.set(key, it);
+      } else {
+        // preferuj s vyplněným vendor
+        const candidate =
+          prev.vendor && prev.vendor.trim()
+            ? prev
+            : it.vendor && it.vendor.trim()
+            ? it
+            : prev; // obě bez vendor -> nech první
+        byKey.set(key, candidate);
+      }
+    }
+    return Array.from(byKey.values()).sort((a, b) => a.name.localeCompare(b.name, "cs"));
+  }
+
+  useEffect(() => {
+    let mounted = true;
     (async () => {
       setLoading(true);
       setError(null);
+      setMsg(null);
 
+      // Přihlášený uživatel
       const { data: sess } = await supabase.auth.getSession();
-      const uid = sess.session?.user?.id ?? null;
-      setUserId(uid);
+      if (!mounted) return;
+      setUserId(sess.session?.user?.id ?? null);
 
-      await loadIngredients(uid);
-
-      const { data: sub } = supabase.auth.onAuthStateChange(async (_evt, session) => {
-        const uid2 = session?.user?.id ?? null;
-        setUserId(uid2);
-        await loadIngredients(uid2);
-      });
-      unsub = () => sub.subscription.unsubscribe();
-
-      setLoading(false);
-    })();
-
-    return () => unsub?.();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  async function loadIngredients(uid: string | null) {
-    setError(null);
-
-    if (!uid) {
-      // nepřihlášený: jen veřejné
+      // Načti suroviny (RLS vrátí veřejné + moje)
       const { data, error } = await supabase
         .from("ingredients")
         .select("*")
-        .is("owner_id", null);
-      if (error) return setError(error.message);
+        .order("name", { ascending: true });
 
-      const pub = (data as Ingredient[]) ?? [];
-      const merged = mergePreferringVendor(pub, []); // jen veřejné
-      setList(sortByName(merged));
-      setPublicCount(pub.length);
-      setOwnCount(0);
-      return;
-    }
+      if (!mounted) return;
 
-    // přihlášený: stáhneme oboje
-    const [pubRes, ownRes] = await Promise.all([
-      supabase.from("ingredients").select("*").is("owner_id", null),
-      supabase.from("ingredients").select("*").eq("owner_id", uid),
-    ]);
-    if (pubRes.error) return setError(pubRes.error.message);
-    if (ownRes.error) return setError(ownRes.error.message);
-
-    const pub = (pubRes.data as Ingredient[]) ?? [];
-    const own = (ownRes.data as Ingredient[]) ?? [];
-
-    const merged = mergePreferringVendor(pub, own);
-    setList(sortByName(merged));
-    setPublicCount(pub.length);
-    setOwnCount(own.length);
-  }
-
-  /** Sloučení:
-   *  1) deduplikace podle (name+vendor), přičemž vlastní má přednost
-   *  2) pro každý název name:
-   *     - pokud existuje aspoň jeden záznam s vendor -> všechny vendor-prázdné téhož názvu zahodíme
-   *     - jinak necháme max. jeden vendor-prázdný (přednost vlastní)
-   */
-  function mergePreferringVendor(publicRows: Ingredient[], ownRows: Ingredient[]) {
-    const mergedByPair = new Map<string, Ingredient>();
-
-    // pořadí: vlastní mají přednost
-    const combined = [...ownRows, ...publicRows];
-
-    // 1) deduplikace podle jméno+vendor
-    for (const row of combined) {
-      const key = keyByNameVendor(row);
-      if (!mergedByPair.has(key)) mergedByPair.set(key, row);
-    }
-
-    const byNameHasVendor = new Map<string, boolean>();
-    for (const row of mergedByPair.values()) {
-      const n = canon(row.name);
-      if (hasVendor(row)) byNameHasVendor.set(n, true);
-    }
-
-    const pickedByNameVendorless = new Map<string, Ingredient>();
-    const final: Ingredient[] = [];
-
-    for (const row of mergedByPair.values()) {
-      const n = canon(row.name);
-      if (hasVendor(row)) {
-        // vždy nech vendor-PLNÉ (různí výrobci se ponechají jako samostatné položky)
-        final.push(row);
+      if (error) {
+        setError(error.message);
+        setList([]);
       } else {
-        // vendor prázdný — přidej jen pokud NEexistuje žádný s výrobcem,
-        // a zároveň max. jeden vendorless na název (přednost vlastní, proto combined pořadí)
-        if (!byNameHasVendor.get(n) && !pickedByNameVendorless.has(n)) {
-          pickedByNameVendorless.set(n, row);
-          final.push(row);
-        }
+        setList(dedupe((data ?? []) as Ingredient[]));
       }
-    }
 
-    return final;
-  }
+      setLoading(false);
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [supabase]);
 
-  function sortByName(arr: Ingredient[]) {
-    return [...arr].sort((a, b) => a.name.localeCompare(b.name, "cs"));
-  }
-
+  /** uložit (vytvořit/aktualizovat) */
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    setMsg(null);
 
-    const protein = parseFloat(form.protein);
-    const carbs = parseFloat(form.carbs);
-    const fat = parseFloat(form.fat);
+    const protein = parseNum(form.protein);
+    const carbs = parseNum(form.carbs);
+    const fat = parseNum(form.fat);
 
     if (!form.name.trim() || Number.isNaN(protein) || Number.isNaN(carbs) || Number.isNaN(fat)) {
-      setError("Vyplň název a čísla pro B/S/T.");
+      setError("Vyplň název a čísla pro B/S/T (můžeš psát i s čárkou).");
       return;
     }
+
     if (!userId) {
       setError("Pro ukládání je potřeba se přihlásit.");
       return;
     }
 
+    setSaving(true);
+
     if (editId) {
-      const { error } = await supabase
+      // UPDATE jen vlastních
+      const { data, error } = await supabase
         .from("ingredients")
         .update({
           name: form.name.trim(),
@@ -180,32 +132,70 @@ export default function SurovinyPage() {
           fat,
         })
         .eq("id", editId)
-        .eq("owner_id", userId);
-      if (error) return setError(error.message);
+        .eq("owner_id", userId)
+        .select("*")
+        .maybeSingle<Ingredient>();
 
-      // po update přepočítej z DB (kvůli pravidlům sloučení vendor/nevendor)
-      await loadIngredients(userId);
+      setSaving(false);
+
+      if (error) {
+        setError(error.message);
+        return;
+      }
+
+      if (data) {
+        setList((prev) =>
+          dedupe(
+            prev.map((i) =>
+              i.id === editId
+                ? {
+                    ...i,
+                    name: data.name,
+                    vendor: data.vendor,
+                    protein: data.protein,
+                    carbs: data.carbs,
+                    fat: data.fat,
+                  }
+                : i
+            )
+          )
+        );
+        setMsg("Surovina upravena ✅");
+      }
       setEditId(null);
-      setForm({ name: "", vendor: "", protein: "", carbs: "", fat: "" });
     } else {
-      const { error } = await supabase
+      // INSERT – pošleme owner_id přímo (nespoléhej na trigger)
+      const { data, error } = await supabase
         .from("ingredients")
         .insert({
+          owner_id: userId,
           name: form.name.trim(),
           vendor: form.vendor.trim() || null,
           protein,
           carbs,
           fat,
-        });
-      if (error) return setError(error.message);
+        })
+        .select("*")
+        .maybeSingle<Ingredient>();
 
-      await loadIngredients(userId);
-      setForm({ name: "", vendor: "", protein: "", carbs: "", fat: "" });
+      setSaving(false);
+
+      if (error) {
+        setError(error.message);
+        return;
+      }
+
+      if (data) {
+        setList((prev) => dedupe([...prev, data]));
+        setMsg("Uloženo do mých surovin ✅");
+      }
     }
+
+    setForm({ name: "", vendor: "", protein: "", carbs: "", fat: "" });
   }
 
   function startEdit(i: Ingredient) {
-    if (i.owner_id !== userId) return;
+    if (i.owner_id !== userId) return; // jen vlastní
     setEditId(i.id);
     setForm({
       name: i.name,
@@ -220,18 +210,19 @@ export default function SurovinyPage() {
   async function remove(id: string) {
     if (!confirm("Smazat tuto surovinu?")) return;
     setError(null);
-    const { error } = await supabase.from("ingredients").delete().eq("id", id);
+    setMsg(null);
+    const { error } = await supabase.from("ingredients").delete().eq("id", id).eq("owner_id", userId ?? "");
     if (error) return setError(error.message);
-    // po smazání načti z DB, aby se případné vendorless stejného názvu znovu „objevily“
-    await loadIngredients(userId);
+    setList((prev) => prev.filter((x) => x.id !== id));
     if (editId === id) {
       setEditId(null);
       setForm({ name: "", vendor: "", protein: "", carbs: "", fat: "" });
     }
+    setMsg("Surovina smazána ✅");
   }
 
-  const visiblePublic = list.filter((x) => x.owner_id === null).length;
-  const visibleOwn = list.filter((x) => x.owner_id === userId).length;
+  const publicCount = list.filter((x) => x.owner_id === null).length;
+  const ownCount = list.filter((x) => x.owner_id === userId).length;
 
   return (
     <main className="max-w-3xl mx-auto p-6 space-y-6">
@@ -240,45 +231,81 @@ export default function SurovinyPage() {
         <Link href="/" className="pill">← Zpět na recepty</Link>
       </div>
 
+      {/* info o přihlášení */}
       {!userId && (
         <div className="card p-4 text-sm">
           Pro přidávání/úpravy se prosím přihlas — veřejnou knihovnu surovin vidíš i bez přihlášení.
         </div>
       )}
 
+      {/* formulář */}
       <form onSubmit={onSubmit} className="card p-4 space-y-3">
         <div className="font-medium">{editId ? "Upravit surovinu" : "Přidat surovinu"}</div>
+
         {error && <div className="text-sm text-red-600">{error}</div>}
+        {msg && <div className="text-sm text-emerald-700">{msg}</div>}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <input className="border rounded px-3 py-2" placeholder="Název *"
-                 value={form.name} onChange={(e) => setForm((v) => ({ ...v, name: e.target.value }))} />
-          <input className="border rounded px-3 py-2" placeholder="Výrobce / prodejce (nepovinné)"
-                 value={form.vendor} onChange={(e) => setForm((v) => ({ ...v, vendor: e.target.value }))} />
-          <input className="border rounded px-3 py-2" placeholder="Bílkoviny na 100 g (g) *" inputMode="decimal"
-                 value={form.protein} onChange={(e) => setForm((v) => ({ ...v, protein: e.target.value }))} />
-          <input className="border rounded px-3 py-2" placeholder="Sacharidy na 100 g (g) *" inputMode="decimal"
-                 value={form.carbs} onChange={(e) => setForm((v) => ({ ...v, carbs: e.target.value }))} />
-          <input className="border rounded px-3 py-2" placeholder="Tuky na 100 g (g) *" inputMode="decimal"
-                 value={form.fat} onChange={(e) => setForm((v) => ({ ...v, fat: e.target.value }))} />
+          <input
+            className="border rounded px-3 py-2"
+            placeholder="Název *"
+            value={form.name}
+            onChange={(e) => setForm((v) => ({ ...v, name: e.target.value }))}
+          />
+          <input
+            className="border rounded px-3 py-2"
+            placeholder="Výrobce / prodejce (nepovinné)"
+            value={form.vendor}
+            onChange={(e) => setForm((v) => ({ ...v, vendor: e.target.value }))}
+          />
+          <input
+            className="border rounded px-3 py-2"
+            placeholder="Bílkoviny na 100 g (g) *"
+            inputMode="decimal"
+            value={form.protein}
+            onChange={(e) => setForm((v) => ({ ...v, protein: e.target.value }))}
+          />
+          <input
+            className="border rounded px-3 py-2"
+            placeholder="Sacharidy na 100 g (g) *"
+            inputMode="decimal"
+            value={form.carbs}
+            onChange={(e) => setForm((v) => ({ ...v, carbs: e.target.value }))}
+          />
+          <input
+            className="border rounded px-3 py-2"
+            placeholder="Tuky na 100 g (g) *"
+            inputMode="decimal"
+            value={form.fat}
+            onChange={(e) => setForm((v) => ({ ...v, fat: e.target.value }))}
+          />
         </div>
 
         <div className="flex items-center gap-3 flex-wrap">
-          <button className="btn-primary">{editId ? "Uložit změny" : "Uložit do mých surovin"}</button>
+          <button type="submit" className="btn-primary disabled:opacity-60" disabled={saving}>
+            {saving ? "Ukládám…" : editId ? "Uložit změny" : "Uložit do mých surovin"}
+          </button>
           {editId && (
-            <button type="button"
-                    onClick={() => { setEditId(null); setForm({ name: "", vendor: "", protein: "", carbs: "", fat: "" }); }}
-                    className="px-3 py-2 rounded border">
+            <button
+              type="button"
+              onClick={() => {
+                setEditId(null);
+                setForm({ name: "", vendor: "", protein: "", carbs: "", fat: "" });
+                setMsg(null);
+                setError(null);
+              }}
+              className="px-3 py-2 rounded border"
+            >
               Zrušit úpravy
             </button>
           )}
           <div className="text-xs text-gray-600">
-            Veřejné v DB: {publicCount} · Moje v DB: {ownCount} · Zobrazeno po sloučení: {list.length}
-            <br />Viditelné veřejné: {visiblePublic} · Viditelné moje: {visibleOwn}
+            Veřejné: {publicCount} · Moje: {ownCount}
           </div>
         </div>
       </form>
 
+      {/* seznam surovin */}
       <section className="card p-4">
         <div className="font-medium mb-3">Knihovna surovin</div>
         {loading ? (
@@ -299,14 +326,19 @@ export default function SurovinyPage() {
                       P {s.protein} g · S {s.carbs} g · T {s.fat} g / 100 g
                     </div>
                   </div>
+
                   {isMine ? (
                     <>
-                      <button className="px-2 py-1 text-xs rounded bg-blue-600 text-white hover:bg-blue-700"
-                              onClick={() => startEdit(s)}>
+                      <button
+                        className="px-2 py-1 text-xs rounded bg-blue-600 text-white hover:bg-blue-700"
+                        onClick={() => startEdit(s)}
+                      >
                         Upravit
                       </button>
-                      <button className="px-2 py-1 text-xs rounded bg-red-600 text-white hover:bg-red-700"
-                              onClick={() => remove(s.id)}>
+                      <button
+                        className="px-2 py-1 text-xs rounded bg-red-600 text-white hover:bg-red-700"
+                        onClick={() => remove(s.id)}
+                      >
                         Smazat
                       </button>
                     </>

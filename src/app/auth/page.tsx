@@ -1,10 +1,10 @@
 "use client";
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import getSupabase from "@/lib/supabaseClient";
+import { createClient } from "@/lib/supabaseClient";
 
-export default function Component() {
-  const supabase = useMemo(() => getSupabase(), []);
+export default function AuthPage() {
+  const supabase = useMemo(() => createClient(), []);
   const router = useRouter();
 
   const [mode, setMode] = useState<"signin" | "signup">("signin");
@@ -14,7 +14,7 @@ export default function Component() {
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setErr(null);
     setMsg(null);
@@ -31,8 +31,9 @@ export default function Component() {
       }
       router.push("/");
       router.refresh();
-    } catch (e: any) {
-      setErr(e?.message || "Něco se nepovedlo.");
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : "Něco se nepovedlo.";
+      setErr(message);
     } finally {
       setLoading(false);
     }
@@ -68,15 +69,8 @@ export default function Component() {
           {err && <div className="text-red-600 text-sm">{err}</div>}
           {msg && <div className="text-emerald-700 text-sm">{msg}</div>}
 
-          <button
-            className="btn-primary w-full disabled:opacity-70"
-            disabled={loading}
-          >
-            {loading
-              ? "Pracuji…"
-              : mode === "signin"
-              ? "Přihlásit se"
-              : "Vytvořit účet"}
+          <button className="btn-primary w-full disabled:opacity-70" disabled={loading}>
+            {loading ? "Pracuji…" : mode === "signin" ? "Přihlásit se" : "Vytvořit účet"}
           </button>
         </form>
 
@@ -84,20 +78,14 @@ export default function Component() {
           {mode === "signin" ? (
             <>
               Nemáš účet?{" "}
-              <button
-                className="text-emerald-700 underline"
-                onClick={() => setMode("signup")}
-              >
+              <button className="text-emerald-700 underline" onClick={() => setMode("signup")}>
                 Zaregistruj se
               </button>
             </>
           ) : (
             <>
               Už máš účet?{" "}
-              <button
-                className="text-emerald-700 underline"
-                onClick={() => setMode("signin")}
-              >
+              <button className="text-emerald-700 underline" onClick={() => setMode("signin")}>
                 Přihlas se
               </button>
             </>

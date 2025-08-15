@@ -1,43 +1,52 @@
 "use client";
+
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import getSupabase from "@/lib/supabaseClient";
+import { createClient } from "@/lib/supabaseClient";
 
 export default function Navbar() {
   const tabs = ["Snídaně", "Oběd", "Večeře", "Svačina", "Dezerty"];
-  const searchParams = useSearchParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
-  const supabase = useMemo(() => getSupabase(), []);
+  // Supabase klient (jen jednou)
+  const supabase = useMemo(() => createClient(), []);
 
+  // URL parametry
   const aktivniKategorie = searchParams.get("kategorie");
   const aktivniHledani = searchParams.get("hledat") || "";
+
+  // Lokální stav
   const [hledat, setHledat] = useState(aktivniHledani);
   const [email, setEmail] = useState<string | null>(null);
 
+  // Sync vyhledávání, když se změní URL
   useEffect(() => setHledat(aktivniHledani), [aktivniHledani]);
 
+  // Načtení session + reaguj na změny přihlášení
   useEffect(() => {
     let mounted = true;
-    let unsubscribe: (() => void) | undefined;
 
     (async () => {
       const { data } = await supabase.auth.getSession();
       if (mounted) setEmail(data.session?.user?.email ?? null);
-
-      const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
-        if (mounted) setEmail(session?.user?.email ?? null);
-      });
-      unsubscribe = () => sub.subscription.unsubscribe();
     })();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_evt, session) => {
+      if (!mounted) return;
+      setEmail(session?.user?.email ?? null);
+    });
 
     return () => {
       mounted = false;
-      unsubscribe?.();
+      subscription?.unsubscribe();
     };
   }, [supabase]);
 
+  // Styl aktivní/neaktivní "pilulky"
   function getClassName(tab: string | null) {
     const base = "rounded-2xl px-3 py-1 transition cursor-pointer";
     const active = "bg-black/40 text-white";
@@ -45,6 +54,7 @@ export default function Navbar() {
     return `${base} ${aktivniKategorie === tab ? active : inactive}`;
   }
 
+  // Odeslání vyhledávání (ponechá aktivní kategorii)
   function onSearchSubmit(e: React.FormEvent) {
     e.preventDefault();
     const params = new URLSearchParams();
@@ -61,12 +71,16 @@ export default function Navbar() {
   return (
     <header className="sticky top-0 z-10 bg-gradient-to-r from-emerald-600 via-emerald-500 to-emerald-600 text-white/95 shadow-lg">
       <nav className="mx-auto max-w-5xl flex items-center justify-between p-4 flex-wrap gap-2">
-        <Link href="/" className="text-2xl font-extrabold">
+        {/* Logo / Domů */}
+        <Link href="/" className="text-2xl font-extrabold" aria-label="Domů">
           🥗 Receptář
         </Link>
 
+        {/* Kategoriální pilulky + rychlé odkazy */}
         <div className="flex gap-2 flex-wrap items-center">
-          <Link href="/" className={getClassName(null)}>Vše</Link>
+          <Link href="/" className={getClassName(null)}>
+            Vše
+          </Link>
           {tabs.map((t) => (
             <Link
               key={t}
@@ -90,9 +104,14 @@ export default function Navbar() {
           </Link>
         </div>
 
+        {/* Vyhledávání + auth */}
         <div className="flex items-center gap-3">
           <form onSubmit={onSearchSubmit} className="flex gap-2">
+            <label className="sr-only" htmlFor="search-input">
+              Hledat recept
+            </label>
             <input
+              id="search-input"
               type="text"
               placeholder="Hledat recept..."
               className="px-3 py-1 rounded-lg text-black"
@@ -102,6 +121,8 @@ export default function Navbar() {
             <button
               type="submit"
               className="bg-white/20 hover:bg-white/30 px-3 py-1 rounded-lg"
+              aria-label="Hledat"
+              title="Hledat"
             >
               🔍
             </button>
@@ -109,7 +130,9 @@ export default function Navbar() {
 
           {email ? (
             <div className="flex items-center gap-2">
-              <span className="hidden sm:inline text-sm opacity-90">{email}</span>
+              <span className="hidden sm:inline text-sm opacity-90" title={email}>
+                {email}
+              </span>
               <button
                 onClick={handleLogout}
                 className="rounded-2xl px-3 py-1 bg-white/20 hover:bg-white/30"

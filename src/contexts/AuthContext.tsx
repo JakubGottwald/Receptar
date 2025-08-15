@@ -1,32 +1,39 @@
 "use client";
+
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import getSupabase from "@/lib/supabaseClient";
+import { createClient } from "@/lib/supabaseClient"; // ⬅️ pojmenovaný import
 import type { User } from "@supabase/supabase-js";
 
 type AuthCtx = { user: User | null; loading: boolean };
 const Ctx = createContext<AuthCtx>({ user: null, loading: true });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const supabase = useMemo(() => getSupabase(), []);
+  const supabase = useMemo(() => createClient(), []);
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let mounted = true;
+    let unsubscribe: (() => void) | undefined;
 
-    supabase.auth.getSession().then(({ data }) => {
-      if (!mounted) return;
-      setUser(data.session?.user ?? null);
-      setLoading(false);
-    });
+    (async () => {
+      const { data } = await supabase.auth.getSession();
+      if (mounted) {
+        setUser(data.session?.user ?? null);
+        setLoading(false);
+      }
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
-      setUser(session?.user ?? null);
-    });
+      const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
+        if (mounted) setUser(session?.user ?? null);
+      });
+
+      // uložit cleanup
+      unsubscribe = () => sub.subscription.unsubscribe();
+    })();
 
     return () => {
       mounted = false;
-      sub?.subscription?.unsubscribe?.();
+      unsubscribe?.();
     };
   }, [supabase]);
 

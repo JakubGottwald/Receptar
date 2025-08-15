@@ -1,15 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
+import Image from "next/image";
 import { createClient } from "@/lib/supabaseClient";
 
 /* ==== Typy ==== */
 type Makra = { protein: number; fat: number; carbs: number; kcal?: number };
 
 type Recept = {
-  id: string;                 // UUID z DB
+  id: string; // UUID
   owner_id: string;
   created_at: string;
   updated_at: string;
@@ -18,8 +19,22 @@ type Recept = {
   popis: string | null;
   suroviny: string[];
   makra: Makra[];
+  foto: string | null; // může být data: URL
+  stitky: string[];
+};
+
+type DbRow = {
+  id: string;
+  owner_id: string;
+  created_at: string;
+  updated_at: string;
+  nazev: string | null;
+  kategorie: string | null;
+  popis: string | null;
+  suroviny: unknown;
+  makra: unknown;
   foto: string | null;
-  stitky: string[];           // flat list
+  stitky: unknown;
 };
 
 type TagGroupKey = "Tagy" | "Kuchyně" | "Období" | "Ingredience" | "Doba přípravy";
@@ -43,6 +58,25 @@ type Razeni =
   | "proteinMax"
   | "proteinMin";
 
+/* ==== Pomocné převodníky ==== */
+const asStringArray = (x: unknown): string[] =>
+  Array.isArray(x) ? x.filter((v): v is string => typeof v === "string") : [];
+
+const asMakraArray = (x: unknown): Makra[] => {
+  if (!Array.isArray(x)) return [];
+  return x.map((m): Makra => {
+    if (typeof m === "object" && m !== null) {
+      const mm = m as Record<string, unknown>;
+      const protein = typeof mm.protein === "number" ? mm.protein : 0;
+      const fat = typeof mm.fat === "number" ? mm.fat : 0;
+      const carbs = typeof mm.carbs === "number" ? mm.carbs : 0;
+      const kcal = typeof mm.kcal === "number" ? (mm.kcal as number) : undefined;
+      return { protein, fat, carbs, kcal };
+    }
+    return { protein: 0, fat: 0, carbs: 0 };
+  });
+};
+
 export default function Home() {
   const supabase = createClient();
 
@@ -62,7 +96,7 @@ export default function Home() {
     let mounted = true;
     (async () => {
       setLoading(true);
-      // session -> jen kvůli info; RLS zajistí, že uvidíš jen svoje
+
       const { data: sess } = await supabase.auth.getSession();
       if (!mounted) return;
       setUserId(sess.session?.user?.id ?? null);
@@ -73,19 +107,23 @@ export default function Home() {
         .order("created_at", { ascending: false });
 
       if (!mounted) return;
-      if (error) {
+      if (error || !data) {
         console.error(error);
         setRecepty([]);
       } else {
-        // přetypuj/normalizuj jsonb -> TS
-        const rows = (data || []).map((r: any) => ({
-          ...r,
-          popis: r.popis ?? null,
-          foto: r.foto ?? null,
-          stitky: Array.isArray(r.stitky) ? r.stitky : [],
-          suroviny: Array.isArray(r.suroviny) ? r.suroviny : [],
-          makra: Array.isArray(r.makra) ? r.makra : [],
-        })) as Recept[];
+        const rows = (data as DbRow[]).map<Recept>((r) => ({
+          id: r.id,
+          owner_id: r.owner_id,
+          created_at: r.created_at,
+          updated_at: r.updated_at,
+          nazev: r.nazev ?? "",
+          kategorie: r.kategorie ?? "",
+          popis: r.popis,
+          suroviny: asStringArray(r.suroviny),
+          makra: asMakraArray(r.makra),
+          foto: r.foto,
+          stitky: asStringArray(r.stitky),
+        }));
         setRecepty(rows);
       }
       setLoading(false);
@@ -98,18 +136,23 @@ export default function Home() {
   // Definice štítků z localStorage (uživatelské rozšíření)
   useEffect(() => {
     try {
-      const ulozene = JSON.parse(localStorage.getItem("definiceStitku") || "null");
+      const ulozene = JSON.parse(localStorage.getItem("definiceStitku") || "null") as
+        | Record<TagGroupKey, unknown[]>
+        | null;
       if (ulozene && typeof ulozene === "object") {
         setDefStitky((prev) => {
           const merged = { ...prev };
           for (const g of TAG_GROUPS_ORDER) {
             const arr = Array.isArray(ulozene[g]) ? ulozene[g] : [];
-            merged[g] = Array.from(new Set([...(prev[g] || []), ...arr]));
+            const safe = asStringArray(arr);
+            merged[g] = Array.from(new Set([...(prev[g] || []), ...safe]));
           }
           return merged;
         });
       }
-    } catch {}
+    } catch {
+      // ignore
+    }
   }, []);
 
   function smazat(id: string) {
@@ -133,12 +176,15 @@ export default function Home() {
   }, [recepty]);
 
   // Do jaké skupiny patří tag
-  function resolveGroupForTag(tag: string): TagGroupKey {
-    for (const g of TAG_GROUPS_ORDER) if (defStitky[g]?.includes(tag)) return g;
-    return "Tagy";
-  }
+  const resolveGroupForTag = useCallback(
+    (tag: string): TagGroupKey => {
+      for (const g of TAG_GROUPS_ORDER) if (defStitky[g]?.includes(tag)) return g;
+      return "Tagy";
+    },
+    [defStitky]
+  );
 
-  // Seskup štítky
+  // Seskup štítky do sekcí
   const tagsByGroup: Record<TagGroupKey, string[]> = useMemo(() => {
     const out: Record<TagGroupKey, string[]> = TAG_GROUPS_ORDER.reduce(
       (acc, g) => ({ ...acc, [g]: [...(defStitky[g] || [])] }),
@@ -152,9 +198,9 @@ export default function Home() {
     }
     for (const g of TAG_GROUPS_ORDER) out[g].sort((a, b) => a.localeCompare(b, "cs"));
     return out;
-  }, [recepty, defStitky]);
+  }, [recepty, defStitky, resolveGroupForTag]);
 
-  // Filtry
+  // Filtrování
   const filtrovaneRecepty = useMemo(() => {
     return recepty.filter((r) => {
       const kategorieOk = aktivniKategorie
@@ -186,7 +232,7 @@ export default function Home() {
     return { protein, kcal, fat, carbs };
   }
 
-  // Řazení (nejnovější podle created_at)
+  // Řazení
   const serazeneRecepty = useMemo(() => {
     const arr = [...filtrovaneRecepty];
     arr.sort((a, b) => {
@@ -272,8 +318,9 @@ export default function Home() {
                         <li key={tag}>
                           <button
                             onClick={() => toggleStitek(tag)}
-                            className={`pill w-full justify-between !rounded-xl !text-emerald-900
-                              ${active ? "ring-2 ring-emerald-500/40 !bg-white/90" : "!bg-white/60"}`}
+                            className={`pill w-full justify-between !rounded-xl !text-emerald-900 ${
+                              active ? "ring-2 ring-emerald-500/40 !bg-white/90" : "!bg-white/60"
+                            }`}
                           >
                             <span className="truncate">{tag}</span>
                             <span className="text-xs opacity-70">({count})</span>
@@ -302,7 +349,9 @@ export default function Home() {
               </p>
               {!userId && (
                 <div className="mt-3">
-                  <Link href="/auth" className="btn-primary">Přihlásit se</Link>
+                  <Link href="/auth" className="btn-primary">
+                    Přihlásit se
+                  </Link>
                 </div>
               )}
             </div>
@@ -315,12 +364,15 @@ export default function Home() {
                     <article className="card overflow-hidden will-change-transform transition-transform duration-200 group-hover:-translate-y-1">
                       {/* Obrázek */}
                       {r.foto ? (
-                        <div className="relative">
-                          <img
+                        <div className="relative h-44">
+                          <Image
                             src={r.foto}
                             alt={r.nazev}
-                            loading="lazy"
-                            className="w-full h-44 object-cover transition duration-200 group-hover:scale-[1.02]"
+                            fill
+                            sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+                            className="object-cover transition duration-200 group-hover:scale-[1.02]"
+                            priority={false}
+                            unoptimized
                           />
                           <span className="absolute left-3 top-3 bg-black/45 text-white text-xs px-2 py-1 rounded-lg backdrop-blur-sm">
                             {r.kategorie}
@@ -338,7 +390,7 @@ export default function Home() {
                         <div className="flex items-start gap-2">
                           <h2 className="text-lg font-semibold leading-snug flex-1">{r.nazev}</h2>
                           <button
-                            onClick={(e) => {
+                            onClick={(e: React.MouseEvent<HTMLButtonElement>) => {
                               e.preventDefault();
                               e.stopPropagation();
                               smazat(r.id);

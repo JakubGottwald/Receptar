@@ -1,0 +1,3 @@
+/* PROBE – dočasně, ať to nejde přehlédnout */
+html,body{ background: black !important; }
+*{ outline: 6px solid yellow !important; }

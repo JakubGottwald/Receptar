@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+/* === Theme vars (emerald/teal) === */
+:root{
+  --primary: 16 185 129;    /* emerald-500 */
+  --primary-600: 5 150 105; /* emerald-600 */
+  --primary-700: 4 120 87;  /* emerald-700 */
+}
+
+/* === Base === */
+@layer base{
+  html, body { height: 100%; }
+
+  body{
+    @apply antialiased text-gray-800;
+    /* jemné jednobarevné pozadí s lehkým pohybem */
+    background:
+      radial-gradient(1200px 600px at 0% -10%, rgb(var(--primary) / 0.18), transparent 60%),
+      radial-gradient(900px 500px at 100% 10%,  rgb(var(--primary) / 0.12), transparent 60%),
+      linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+    animation: bgShift 14s ease-in-out infinite alternate;
+    background-attachment: fixed;
+  }
+
+  ::selection{ background: rgb(var(--primary) / 0.25); }
+}
+
+/* === Reusable components === */
+@layer components{
+  .card{
+    @apply bg-white/80 backdrop-blur-xl rounded-2xl shadow-lg border border-white/30 transition
+           hover:shadow-xl hover:-translate-y-0.5;
+  }
+
+  .pill{
+    @apply inline-flex items-center gap-1 rounded-full px-3 py-1 text-sm
+           border border-white/30 bg-white/20 text-white hover:bg-white/30 transition;
+  }
+
+  .btn-primary{
+    @apply rounded-xl px-4 py-2 text-white bg-emerald-600 hover:bg-emerald-700 active:scale-95 transition;
+  }
+}
+
+/* === Utilities (animace pro karty apod.) === */
+@layer utilities{
+  .animate-card{
+    animation: fadeUp .55s ease-out both;
+    will-change: transform, opacity;
+  }
+}
+
+/* === Background motion === */
+@keyframes bgShift{
+  0%   { background-position: 0px 0px, 0px 0px, 0 0; }
+  100% { background-position: -60px -20px, 40px 30px, 0 0; }
+}
+
+/* === Fade-up pro vstup karet === */
+@keyframes fadeUp{
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

@@ -1,3 +1,4 @@
+/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -5,7 +6,6 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabaseClient";
 
-/* ---------- Typy ---------- */
 type Makra = { protein: number; fat: number; carbs: number; kcal?: number };
 
 type DbRow = {
@@ -16,10 +16,10 @@ type DbRow = {
   nazev: string | null;
   kategorie: string | null;
   popis: string | null;
-  suroviny: unknown;  // jsonb
-  makra: unknown;     // jsonb
+  suroviny: unknown;
+  makra: unknown;
   foto: string | null;
-  stitky: unknown;    // jsonb
+  stitky: unknown;
 };
 
 type Recept = {
@@ -36,7 +36,6 @@ type Recept = {
   stitky: string[];
 };
 
-/* ---------- Pomocné převodníky ---------- */
 const asStringArray = (x: unknown): string[] =>
   Array.isArray(x) ? x.filter((v): v is string => typeof v === "string") : [];
 
@@ -45,110 +44,118 @@ const asMakraArray = (x: unknown): Makra[] => {
   return x.map((m): Makra => {
     if (m && typeof m === "object") {
       const mm = m as Record<string, unknown>;
-      const protein = typeof mm.protein === "number" ? mm.protein : 0;
-      const fat = typeof mm.fat === "number" ? mm.fat : 0;
-      const carbs = typeof mm.carbs === "number" ? mm.carbs : 0;
-      const kcal = typeof mm.kcal === "number" ? (mm.kcal as number) : undefined;
-      return { protein, fat, carbs, kcal };
+      return {
+        protein: typeof mm.protein === "number" ? mm.protein : 0,
+        fat: typeof mm.fat === "number" ? mm.fat : 0,
+        carbs: typeof mm.carbs === "number" ? mm.carbs : 0,
+        kcal: typeof mm.kcal === "number" ? (mm.kcal as number) : undefined,
+      };
     }
     return { protein: 0, fat: 0, carbs: 0 };
   });
 };
 
-/* ---------- Komponenta ---------- */
-export default function RecipeDetailPage() {
-  const params = useParams<{ id: string }>();
-  const id = String(params?.id || "");
-  const router = useRouter();
+type Debug = Record<string, unknown>;
+const isRecord = (o: unknown): o is Record<string, unknown> =>
+  typeof o === "object" && o !== null;
+const hasId = (o: unknown): o is { id: string | number } =>
+  isRecord(o) && ("id" in o) && (typeof (o as Record<string, unknown>).id === "string" || typeof (o as Record<string, unknown>).id === "number");
 
+export default function RecipeDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
 
   const [rec, setRec] = useState<Recept | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [debug, setDebug] = useState<Record<string, unknown>>({});
+  const [debug, setDebug] = useState<Debug | null>(null);
 
-  const calcKcal = (m: Makra) =>
-    m.kcal ?? (m.protein || 0) * 4 + (m.carbs || 0) * 4 + (m.fat || 0) * 9;
+  async function fetchRecipe() {
+    setLoading(true);
+    setDebug((prev) => ({ ...(prev ?? {}), startedAt: new Date().toISOString() }));
 
-  useEffect(() => {
-    let mounted = true;
+    const { data: sess } = await supabase.auth.getSession();
+    const uid = sess.session?.user?.id ?? null;
+    setUserId(uid);
 
-    async function run() {
-      setLoading(true);
-      setDebug((d) => ({ ...d, startedAt: new Date().toISOString(), idParam: id }));
+    const { data, error } = await supabase
+      .from("recipes")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle<DbRow>();
 
-      // 1) získej session (kvůli RLS a UX)
-      const { data: sess } = await supabase.auth.getSession();
-      const uid = sess.session?.user?.id ?? null;
-      if (!mounted) return;
-      setUserId(uid);
+    setDebug((prev) => ({
+      ...(prev ?? {}),
+      supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL,
+      idParam: id,
+      userId: uid,
+      gotError: error?.message || null,
+      gotNull: !data,
+    }));
 
-      // 2) natáhni recept z DB; uvidíš ho jen, pokud owner_id = uid (RLS)
-      const { data, error } = await supabase
-        .from("recipes")
-        .select(
-          "id, owner_id, created_at, updated_at, nazev, kategorie, popis, suroviny, makra, foto, stitky"
-        )
-        .eq("id", id)
-        .single();
-
-      if (!mounted) return;
-
-      setDebug((d) => ({
-        ...d,
-        supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL,
-        gotError: error?.message || null,
-        gotData: !!data,
-        userId: uid,
-      }));
-
-      if (error) {
-        // typicky: 406/404 not found kvůli RLS nebo neexistující záznam
-        setRec(null);
-        setLoading(false);
-        return;
-      }
-
-      const row = data as DbRow;
-
-      const normalized: Recept = {
-        id: row.id,
-        owner_id: row.owner_id,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-        nazev: row.nazev ?? "",
-        kategorie: row.kategorie ?? "",
-        popis: row.popis ?? null,
-        suroviny: asStringArray(row.suroviny),
-        makra: asMakraArray(row.makra),
-        foto: row.foto ?? null,
-        stitky: asStringArray(row.stitky),
-      };
-
-      setRec(normalized);
+    if (error) {
+      console.error(error);
+      setRec(null);
       setLoading(false);
+      return;
     }
 
-    if (id) run();
-    else setLoading(false);
+    if (!data) {
+      // fallback na localStorage (přechodně)
+      try {
+        const loc = JSON.parse(localStorage.getItem("recepty") || "[]");
+        const found = Array.isArray(loc)
+          ? loc.find((r: unknown) => hasId(r) && String(r.id) === String(id))
+          : undefined;
 
-    return () => {
-      mounted = false;
-    };
-  }, [id, supabase]);
+        if (found && isRecord(found)) {
+          setRec({
+            id: String(found.id as string | number),
+            owner_id: uid || "",
+            created_at: "",
+            updated_at: "",
+            nazev: typeof found.nazev === "string" ? found.nazev : "",
+            kategorie: typeof found.kategorie === "string" ? found.kategorie : "",
+            popis: typeof found.popis === "string" ? found.popis : null,
+            suroviny: asStringArray(found.suroviny),
+            makra: asMakraArray(found.makra),
+            foto: typeof found.foto === "string" ? found.foto : null,
+            stitky: asStringArray(found.stitky),
+          });
+        } else {
+          setRec(null);
+        }
+      } catch {
+        setRec(null);
+      }
+      setLoading(false);
+      return;
+    }
 
-  /* ---------- Render stavy ---------- */
-  if (!id) {
-    return (
-      <main className="max-w-3xl mx-auto p-6">
-        <p>Chybí ID receptu v URL.</p>
-        <button onClick={() => router.push("/")} className="mt-3 px-3 py-2 rounded border">
-          ← Zpět
-        </button>
-      </main>
-    );
+    setRec({
+      id: data.id,
+      owner_id: data.owner_id,
+      created_at: data.created_at,
+      updated_at: data.updated_at,
+      nazev: data.nazev ?? "",
+      kategorie: data.kategorie ?? "",
+      popis: data.popis,
+      suroviny: asStringArray(data.suroviny),
+      makra: asMakraArray(data.makra),
+      foto: data.foto,
+      stitky: asStringArray(data.stitky),
+    });
+    setLoading(false);
   }
+
+  useEffect(() => {
+    fetchRecipe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  const calcKcal = (m: Makra) =>
+    m.kcal ?? (m.protein ?? 0) * 4 + (m.carbs ?? 0) * 4 + (m.fat ?? 0) * 9;
 
   if (loading) {
     return (
@@ -164,15 +171,27 @@ export default function RecipeDetailPage() {
         <p className="text-red-700 font-semibold">Recept nenalezen.</p>
         <div className="text-sm text-gray-600">
           {userId
-            ? "Recept neexistuje, nebo k němu nemáš přístup (RLS)."
+            ? "Buď neexistuje, nebo není tvůj (RLS)."
             : "Nejsi přihlášen – bez přihlášení neuvidíš žádné recepty."}
         </div>
+
         <div className="flex gap-2">
-          <button onClick={() => router.back()} className="px-3 py-2 rounded border">← Zpět</button>
+          <button onClick={() => router.back()} className="px-3 py-2 rounded border">
+            ← Zpět
+          </button>
+          <button
+            onClick={fetchRecipe}
+            className="px-3 py-2 rounded border bg-emerald-600 text-white"
+          >
+            Force fetch z DB
+          </button>
           {!userId && (
-            <Link href="/auth" className="px-3 py-2 rounded border">Přihlásit</Link>
+            <Link href="/auth" className="px-3 py-2 rounded border">
+              Přihlásit
+            </Link>
           )}
         </div>
+
         <details className="mt-4 text-xs">
           <summary>Debug</summary>
           <pre className="mt-2 bg-gray-50 p-2 rounded border overflow-auto">
@@ -183,11 +202,12 @@ export default function RecipeDetailPage() {
     );
   }
 
-  const sum = rec.makra.reduce(
+  type Totals = { protein: number; fat: number; carbs: number; kcal: number };
+  const sum: Totals = rec.makra.reduce<Totals>(
     (a, m) => ({
-      protein: a.protein + (m.protein || 0),
-      fat: a.fat + (m.fat || 0),
-      carbs: a.carbs + (m.carbs || 0),
+      protein: a.protein + (m.protein ?? 0),
+      fat: a.fat + (m.fat ?? 0),
+      carbs: a.carbs + (m.carbs ?? 0),
       kcal: a.kcal + calcKcal(m),
     }),
     { protein: 0, fat: 0, carbs: 0, kcal: 0 }
@@ -195,7 +215,9 @@ export default function RecipeDetailPage() {
 
   return (
     <main className="max-w-3xl mx-auto p-6 space-y-4">
-      <button onClick={() => router.back()} className="px-3 py-2 rounded border">← Zpět</button>
+      <button onClick={() => router.back()} className="px-3 py-2 rounded border">
+        ← Zpět
+      </button>
 
       {rec.foto && (
         <img
@@ -213,7 +235,7 @@ export default function RecipeDetailPage() {
           {rec.stitky.map((t, i) => (
             <span
               key={i}
-              className="px-2 py-0.5 rounded-full text-xs bg-emerald-50 text-emerald-700 border border-emerald-200"
+              className="px-2 py-0.5 rounded-full text-xs bg-emerald-50 text-emerald-700 border"
             >
               {t}
             </span>

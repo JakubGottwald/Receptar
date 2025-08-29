@@ -10,7 +10,7 @@ export default function Navbar() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  // Supabase klient (jen jednou)
+  // Supabase klient (inicializovat jen jednou)
   const supabase = useMemo(() => createClient(), []);
 
   // URL parametry
@@ -21,7 +21,7 @@ export default function Navbar() {
   const [hledat, setHledat] = useState(aktivniHledani);
   const [email, setEmail] = useState<string | null>(null);
 
-  // Sync vyhledávání, když se změní URL
+  // Sync vyhledávání při změně URL
   useEffect(() => setHledat(aktivniHledani), [aktivniHledani]);
 
   // Načtení session + reaguj na změny přihlášení
@@ -46,7 +46,7 @@ export default function Navbar() {
     };
   }, [supabase]);
 
-  // Styl aktivní/neaktivní "pilulky"
+  // Styl aktivní/neaktivní "pilulky" (kategorie)
   function getClassName(tab: string | null) {
     const base = "rounded-2xl px-3 py-1 transition cursor-pointer";
     const active = "bg-black/40 text-white";
@@ -90,6 +90,8 @@ export default function Navbar() {
               {t}
             </Link>
           ))}
+
+          {/* Akční odkazy */}
           <Link
             href="/pridat"
             className="rounded-2xl px-3 py-1 bg-white/20 hover:bg-white/30 text-white"
@@ -101,6 +103,13 @@ export default function Navbar() {
             className="rounded-2xl px-3 py-1 bg-white/20 hover:bg-white/30 text-white"
           >
             🧺 Moje suroviny
+          </Link>
+          <Link
+            href="/nakupni-seznam"
+            className="rounded-2xl px-3 py-1 bg-white/20 hover:bg-white/30 text-white"
+            title="Nákupní seznam"
+          >
+            🛒 Nákupní seznam
           </Link>
         </div>
 

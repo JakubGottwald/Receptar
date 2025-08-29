@@ -158,7 +158,6 @@ function writeStoredPlan(uid: string, weekStartISO: string, plan: WeekPlan) {
 }
 
 /* ===================== Cloud (Supabase) ===================== */
-
 async function loadPlanFromCloud(
   supabase: ReturnType<typeof createClient>,
   ownerId: string,
@@ -286,7 +285,6 @@ export default function NakupniSeznamPage() {
       }
 
       // === Načti plán (local & cloud) a slouč ===
-      // vytvoř default prázdný týden pro případ bez dat
       const empty = defaultPlan(weekDays);
 
       if (!userId) {
@@ -306,18 +304,15 @@ export default function NakupniSeznamPage() {
         loadPlanFromCloud(supabase, userId, weekStartISO),
       ]);
 
-      // rozhodnutí
       if (!local && !remote) {
         setPlan(empty);
       } else if (local && !remote) {
         setPlan(local.plan);
-        // pošleme do cloudu
         await savePlanToCloud(supabase, userId, weekStartISO, local.plan);
       } else if (!local && remote) {
         setPlan(remote.plan);
         writeStoredPlan(userId, weekStartISO, remote.plan);
       } else {
-        // oboje existuje → vyber novější
         const localTs = new Date(local!.updatedAt).getTime();
         const remoteTs = new Date(remote!.updated_at).getTime();
         if (remoteTs > localTs) {
@@ -349,15 +344,12 @@ export default function NakupniSeznamPage() {
   // Ukládej změny: localStorage vždy, cloud s debounce (jen když je přihlášený)
   useEffect(() => {
     if (!userId) {
-      // anonymní persistace
       writeStoredPlan("anon", weekStartISO, plan);
       return;
     }
 
-    // local
     writeStoredPlan(userId, weekStartISO, plan);
 
-    // cloud debounce
     setSyncing("saving");
     const t = setTimeout(() => {
       void savePlanToCloud(supabase, userId, weekStartISO, plan).finally(() =>
@@ -432,8 +424,6 @@ export default function NakupniSeznamPage() {
   }
 
   /* ===== Další suroviny (dropdown z mých surovin) ===== */
-  type ExtraForm = { ingredientId: string; amount: string; unit: Jednotka };
-
   function setExtraForm(dayIso: string, patch: Partial<ExtraForm>) {
     setExtraForms((prev) => ({ ...prev, [dayIso]: { ...prev[dayIso], ...patch } }));
   }
@@ -727,7 +717,10 @@ export default function NakupniSeznamPage() {
         ) : (
           <ul className="grid sm:grid-cols-2 gap-x-6 gap-y-2">
             {summary.map((row, i) => (
-              <li key={`${row.name}-${row.vendor ?? ""}-${row.unit}-${i}`} className="flex items-center justify-between">
+              <li
+                key={`${row.name}-${row.vendor ?? ""}-${row.unit}-${i}`}
+                className="flex items-center justify-between"
+              >
                 <span className="truncate">
                   {row.name}
                   {row.vendor ? ` (${row.vendor})` : ""}

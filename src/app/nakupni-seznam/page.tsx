@@ -1,4 +1,3 @@
-/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import Link from "next/link";
@@ -91,7 +90,6 @@ function utcDate(y: number, m: number, d: number) {
   return new Date(Date.UTC(y, m, d));
 }
 function mondayOfUTC(date: Date) {
-  // 1=Po..7=Ne
   const dow = (date.getUTCDay() || 7) - 1; // 0..6 (Po..Ne)
   const monday = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
   monday.setUTCDate(monday.getUTCDate() - dow);
@@ -259,7 +257,10 @@ export default function NakupniSeznamPage() {
       setUserId(session?.user?.id ?? null);
       setAuthResolved(true);
     });
-    return () => sub.subscription?.unsubscribe();
+    return () => {
+      mounted = false;
+      sub.subscription?.unsubscribe();
+    };
   }, [supabase]);
 
   // 2) Načti recepty, ingredience a PLÁN (merge anon/user/cloud) až když víme, zda je uživatel
@@ -300,39 +301,26 @@ export default function NakupniSeznamPage() {
       // ==== Načtení a MERGE plánu ====
       const empty = defaultPlan(weekDaysUTC);
 
-      // local anon + local user + cloud user
       const localAnon = readStored("anon", weekStartISO);
       const localUser = userId ? readStored(userId, weekStartISO) : null;
       const remote = userId ? await loadPlanFromCloud(supabase, userId, weekStartISO) : null;
 
-      // vyber „nejlepší“ plán
       const pick = (): WeekPlan => {
-        const candidates: Array<{ src: "anon" | "local" | "remote"; ts: number; plan: WeekPlan }> =
-          [];
-
+        const candidates: Array<{ src: "anon" | "local" | "remote"; ts: number; plan: WeekPlan }> = [];
         if (localAnon) candidates.push({ src: "anon", ts: Date.parse(localAnon.updatedAt), plan: localAnon.plan });
         if (localUser) candidates.push({ src: "local", ts: Date.parse(localUser.updatedAt), plan: localUser.plan });
         if (remote) candidates.push({ src: "remote", ts: Date.parse(remote.updated_at), plan: remote.plan });
-
         if (candidates.length === 0) return empty;
-
-        // když mají stejný čas, dej přednost tomu s větším počtem neodškrtnutých položek (pravděpodobně aktuální práce)
         candidates.sort((a, b) => {
           if (b.ts !== a.ts) return b.ts - a.ts;
           return countUncheckedItems(b.plan) - countUncheckedItems(a.plan);
         });
-
         return candidates[0].plan;
       };
 
       const merged = pick();
       setPlan(merged);
 
-      // Migrační/rovnací zápisy (ať jsou všechna místa v souladu)
-      //  - pokud je uživatel přihlášený:
-      //    * přepiš localStorage(user) na merged
-      //    * ulož do cloudu
-      //    * smaž localStorage(anon) pro tento týden (ať se to už nemotá)
       if (userId) {
         writeStored(userId, weekStartISO, merged);
         try {
@@ -343,11 +331,10 @@ export default function NakupniSeznamPage() {
         }
         if (localAnon) deleteStored("anon", weekStartISO);
       } else {
-        // nepřihlášený – piš do anon storage
         writeStored("anon", weekStartISO, merged);
       }
 
-      // init mini formulářů „Další suroviny“
+      // init mini formulářů
       const forms: Record<string, ExtraForm> = {};
       for (const d of weekDaysUTC) forms[toIsoDateUTC(d)] = { ingredientId: "", amount: "", unit: "g" };
       setExtraForms(forms);
@@ -365,10 +352,8 @@ export default function NakupniSeznamPage() {
   useEffect(() => {
     if (!hydrated) return;
     const uid = userId ?? "anon";
-    // vždy lokálně (okamžitě)
     writeStored(uid, weekStartISO, plan);
 
-    // a do cloudu (jen přihlášený) s krátkým debounce
     if (!userId) return;
     setSyncing("saving");
     const t = setTimeout(() => {
@@ -406,7 +391,7 @@ export default function NakupniSeznamPage() {
       if (mealKey === "extra") {
         const updated = day.extra.map((it) => (it.id === itemId ? { ...it, checked: !it.checked } : it));
         return { ...prev, [dayIso]: { ...day, extra: updated } };
-    }
+      }
       const section = day[mealKey];
       const updated = section.items.map((it) => (it.id === itemId ? { ...it, checked: !it.checked } : it));
       return { ...prev, [dayIso]: { ...day, [mealKey]: { ...section, items: updated } } };

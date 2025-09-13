@@ -2,10 +2,10 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabaseClient";
 
-/* ===================== Typy ===================== */
+/* =============== Typy =============== */
 type Jednotka = "g" | "ml" | "ks";
 
 type RecipeRow = {
@@ -56,27 +56,23 @@ type DayMeals = {
 
 type WeekPlan = Record<string, DayMeals>; // key = YYYY-MM-DD (Po..Ne)
 
-/** Pro localStorage (metadata + plan) */
 type StoredPlan = {
   version: 1;
-  updatedAt: string; // ISO
+  updatedAt: string;
   plan: WeekPlan;
 };
 
-/** Pro Supabase dotaz */
 type MealPlanRow = {
   plan: WeekPlan;
   updated_at: string;
 };
 
-/** Mini-formulář pro "Další suroviny" (per den) */
 type ExtraForm = { ingredientId: string; amount: string; unit: Jednotka };
 
-/* ===================== Pomocné funkce ===================== */
+/* =============== Utils =============== */
 const asStringArray = (x: unknown): string[] =>
   Array.isArray(x) ? x.filter((v): v is string => typeof v === "string") : [];
 
-/** "100 g Jogurt bílý (Lidl)" => { amount:100, unit:"g", name:"Jogurt bílý", vendor:"Lidl" } */
 function parseLine(line: string): ParsedLine {
   const m = line.match(/^(\d+)\s*(g|ml|ks)\s+(.+?)(?:\s*\(([^)]+)\))?$/i);
   if (m) {
@@ -87,7 +83,6 @@ function parseLine(line: string): ParsedLine {
       vendor: m[4] || undefined,
     };
   }
-  // fallback – celé jako název, 1 ks
   return { amount: 1, unit: "ks", name: line };
 }
 
@@ -122,6 +117,10 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+function vendorLabel(v: string | null | undefined) {
+  return v ? ` (${v})` : "";
+}
+
 function countUncheckedItems(plan: WeekPlan) {
   let c = 0;
   for (const k of Object.keys(plan)) {
@@ -134,7 +133,7 @@ function countUncheckedItems(plan: WeekPlan) {
   return c;
 }
 
-/* ===================== LocalStorage ===================== */
+/* =============== LocalStorage =============== */
 function storageKey(uid: string, weekStartISO: string) {
   return `shopping-week:${uid}:${weekStartISO}`;
 }
@@ -172,7 +171,7 @@ function writeStoredPlan(uid: string, weekStartISO: string, plan: WeekPlan) {
   }
 }
 
-/* ===================== Cloud (Supabase) ===================== */
+/* =============== Cloud (Supabase) =============== */
 async function loadPlanFromCloud(
   supabase: ReturnType<typeof createClient>,
   ownerId: string,
@@ -207,14 +206,14 @@ async function savePlanToCloud(
     );
 }
 
-/* ===================== Hlavní komponenta ===================== */
+/* =============== Hlavní komponenta =============== */
 export default function NakupniSeznamPage() {
   const supabase = useMemo(() => createClient(), []);
   const [userId, setUserId] = useState<string | null>(null);
 
-  // 1) výběr týdne — od 1. 9. 2025 (pondělí)
-  const baseMonday = useMemo(() => new Date(2025, 8, 1), []); // 1.9.2025
-  const [weekIndex, setWeekIndex] = useState(0); // posun od baseMonday v týdnech
+  // Výběr týdne – začíná 1. 9. 2025 (pondělí)
+  const baseMonday = useMemo(() => new Date(2025, 8, 1), []);
+  const [weekIndex, setWeekIndex] = useState(0);
   const weekStart = useMemo(() => {
     const d = new Date(baseMonday);
     d.setDate(d.getDate() + weekIndex * 7);
@@ -223,24 +222,23 @@ export default function NakupniSeznamPage() {
   const weekStartISO = toIsoDate(weekStart);
   const weekDays = [...Array(7)].map((_, i) => addDays(weekStart, i));
 
-  // 2) data uživatele
+  // Data
   const [recipes, setRecipes] = useState<Array<{ id: string; nazev: string; suroviny: string[] }>>(
     []
   );
   const [ingredients, setIngredients] = useState<IngredientRow[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // 3) plán týdne
+  // Plán týdne
   const [plan, setPlan] = useState<WeekPlan>({});
-  const [hydrated, setHydrated] = useState(false); // po načtení local/cloud = true
-
-  // 4) formuláře pro "Další suroviny" (per den)
-  const [extraForms, setExtraForms] = useState<Record<string, ExtraForm>>({}); // key = isoDay
-
-  // 5) Sync indikace
+  const [hydrated, setHydrated] = useState(false);
+  const lastSavedSnapshot = useRef<string>(""); // co je poslední uložená verze plánu
   const [syncing, setSyncing] = useState<"idle" | "saving" | "loading">("idle");
 
-  // Načtení přihlášení
+  // Extra formíky
+  const [extraForms, setExtraForms] = useState<Record<string, ExtraForm>>({});
+
+  /* ==== Auth ==== */
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -253,21 +251,19 @@ export default function NakupniSeznamPage() {
     };
   }, [supabase]);
 
-  // Načtení receptů, ingrediencí a plánu (včetně sloučení local vs. cloud)
+  /* ==== Načti recepty, ingredience a plán pro konkrétní týden ==== */
   useEffect(() => {
     let mounted = true;
     (async () => {
       setLoading(true);
-      setHydrated(false); // budeme znovu hydratovat při změně týdne / uživatele
+      setHydrated(false);
 
-      // Recepty (RLS vrátí jen tvoje)
+      // Recepty
       const { data: rcp } = await supabase
         .from("recipes")
         .select("id, owner_id, nazev, suroviny")
         .order("created_at", { ascending: false });
-
       if (!mounted) return;
-
       const recs =
         (rcp as RecipeRow[] | null)?.map((r) => ({
           id: r.id,
@@ -276,67 +272,67 @@ export default function NakupniSeznamPage() {
         })) ?? [];
       setRecipes(recs);
 
-      // Moje suroviny (jen vlastník)
+      // Moje suroviny
       if (userId) {
         const { data: ingr } = await supabase
           .from("ingredients")
           .select("*")
           .eq("owner_id", userId)
           .order("name", { ascending: true });
-
         if (!mounted) return;
         setIngredients((ingr ?? []) as IngredientRow[]);
       } else {
         setIngredients([]);
       }
 
-      // === Načti plán (local & cloud) a slouč ===
+      // Prázdný plán týdne
       const empty = defaultPlan(weekDays);
 
-      if (!userId) {
-        const anonUid = "anon";
-        const local = readStoredPlan(anonUid, weekStartISO);
-        setPlan(local?.plan ?? empty);
-        initExtraForms(weekDays);
-        setHydrated(true);
-        setLoading(false);
-        return;
+      // Načti zdroj pravdy pro tento týden
+      const localUid = userId ?? "anon";
+      const local = readStoredPlan(localUid, weekStartISO);
+      let chosen: WeekPlan | null = local?.plan ?? null;
+
+      if (userId) {
+        setSyncing("loading");
+        const remote = await loadPlanFromCloud(supabase, userId, weekStartISO);
+        // Vyber “lepší” plán (timestamp + hezkyji heuristika)
+        if (!local && !remote) {
+          chosen = empty;
+        } else if (local && !remote) {
+          chosen = local.plan;
+        } else if (!local && remote) {
+          chosen = remote.plan;
+        } else {
+          const localTs = new Date(local!.updatedAt).getTime();
+          const remoteTs = new Date(remote!.updated_at).getTime();
+          if (remoteTs === localTs) {
+            const lc = countUncheckedItems(local!.plan);
+            const rc = countUncheckedItems(remote!.plan);
+            chosen = rc > lc ? remote!.plan : local!.plan;
+          } else if (remoteTs > localTs) {
+            const rc = countUncheckedItems(remote!.plan);
+            const lc = countUncheckedItems(local!.plan);
+            chosen = rc === 0 && lc > 0 ? local!.plan : remote!.plan;
+          } else {
+            chosen = local!.plan;
+          }
+        }
+        setSyncing("idle");
       }
 
-      setSyncing("loading");
-      const [local, remote] = await Promise.all([
-        Promise.resolve(readStoredPlan(userId, weekStartISO)),
-        loadPlanFromCloud(supabase, userId, weekStartISO),
-      ]);
+      const finalPlan = chosen ?? empty;
+      setPlan(finalPlan);
+      // nastav snapshot a hned zapiš do local (aby i offline bylo aktuální)
+      lastSavedSnapshot.current = JSON.stringify(finalPlan);
+      writeStoredPlan(localUid, weekStartISO, finalPlan);
 
-      // Heuristika: preferuj plán s více nezaškrtnutými položkami, když jsou timestampy „sporné“
-      const pickPlan = (): WeekPlan => {
-        if (!local && !remote) return empty;
-        if (local && !remote) return local.plan;
-        if (!local && remote) return remote.plan;
+      // pokud je uživatel přihlášen, zajisti existenci řádku v cloudu
+      if (userId) {
+        await savePlanToCloud(supabase, userId, weekStartISO, finalPlan);
+      }
 
-        const localTs = new Date(local!.updatedAt).getTime();
-        const remoteTs = new Date(remote!.updated_at).getTime();
-
-        if (remoteTs === localTs) {
-          const lc = countUncheckedItems(local!.plan);
-          const rc = countUncheckedItems(remote!.plan);
-          return rc > lc ? remote!.plan : local!.plan;
-        }
-        if (remoteTs > localTs) {
-          const rc = countUncheckedItems(remote!.plan);
-          const lc = countUncheckedItems(local!.plan);
-          return rc === 0 && lc > 0 ? local!.plan : remote!.plan;
-        }
-        return local!.plan;
-      };
-
-      const merged = pickPlan();
-      setPlan(merged);
-      writeStoredPlan(userId, weekStartISO, merged); // zapiš vybraný do local
-      await savePlanToCloud(supabase, userId, weekStartISO, merged); // srovnej cloud
-
-      setSyncing("idle");
+      // připrav mini-formy
       initExtraForms(weekDays);
       setHydrated(true);
       setLoading(false);
@@ -354,26 +350,35 @@ export default function NakupniSeznamPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase, userId, weekStartISO]);
 
-  // Ukládej změny:
-  // - localStorage VŽDY (i během hydratace, aby se nic neztratilo)
-  // - do Supabase s debounce, ale až po hydrataci a jen pro přihlášené
+  /* ==== Ukládání po každé změně plánu ==== */
   useEffect(() => {
-    const uid = userId ?? "anon";
-    writeStoredPlan(uid, weekStartISO, plan);
+    const snap = JSON.stringify(plan);
+    // Ulož vždy do localStorage (anon i přihl.), ať je návrat rychlý
+    const localUid = userId ?? "anon";
+    writeStoredPlan(localUid, weekStartISO, plan);
 
-    if (!userId) return;       // nepřihlášený nepushuje do cloudu
-    if (!hydrated) return;     // cloud až po hydrataci
+    // Do cloudu jen když:
+    // - uživatel je přihlášen
+    // - jsme po hydrataci
+    // - změna oproti poslední uložené verzi (omezení duplicitních zápisů)
+    if (!userId || !hydrated) return;
+    if (snap === lastSavedSnapshot.current) return;
 
     setSyncing("saving");
-    const t = setTimeout(() => {
-      void savePlanToCloud(supabase, userId, weekStartISO, plan).finally(() =>
-        setSyncing("idle")
-      );
-    }, 500);
-    return () => clearTimeout(t);
+    let cancelled = false;
+    (async () => {
+      await savePlanToCloud(supabase, userId, weekStartISO, plan);
+      if (!cancelled) {
+        lastSavedSnapshot.current = snap;
+        setSyncing("idle");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [plan, userId, weekStartISO, hydrated, supabase]);
 
-  /* ===== Helpers pro prázdný týden ===== */
+  /* ==== Helpers pro empty/default ==== */
   function emptyMeals(): DayMeals {
     return {
       snidane: { items: [] },
@@ -382,83 +387,58 @@ export default function NakupniSeznamPage() {
       extra: [],
     };
   }
-
   function defaultPlan(days: Date[]): WeekPlan {
     const p: WeekPlan = {};
     for (const d of days) p[toIsoDate(d)] = emptyMeals();
     return p;
   }
 
-  /* ===== Volby jídel (dropdown s recepty) ===== */
+  /* ==== Změna receptu pro jídlo ==== */
   function setMealRecipe(dayIso: string, meal: keyof Omit<DayMeals, "extra">, recipeId: string) {
     setPlan((prev) => {
       const day = prev[dayIso] ?? emptyMeals();
-      const r = recipes.find((x) => x.id === recipeId);
 
-      // podpora „vyprázdnit výběr“
+      // možnost "vyprázdnit"
       if (!recipeId) {
         return {
           ...prev,
-          [dayIso]: {
-            ...day,
-            [meal]: { recipeId: undefined, items: [] },
-          },
+          [dayIso]: { ...day, [meal]: { recipeId: undefined, items: [] } },
         };
       }
 
+      const r = recipes.find((x) => x.id === recipeId);
       const items: PlannedItem[] = r
         ? r.suroviny.map((line) => {
-            const parsed = parseLine(line);
-            return {
-              id: uid(),
-              name: parsed.name,
-              vendor: parsed.vendor,
-              amount: parsed.amount,
-              unit: parsed.unit,
-              checked: false,
-              source: "recipe",
-            };
+            const { name, vendor, amount, unit } = parseLine(line);
+            return { id: uid(), name, vendor, amount, unit, checked: false, source: "recipe" };
           })
         : [];
-
-      return {
-        ...prev,
-        [dayIso]: {
-          ...day,
-          [meal]: { recipeId, items },
-        },
-      };
+      return { ...prev, [dayIso]: { ...day, [meal]: { recipeId, items } } };
     });
   }
 
-  /* ===== Checkboxy pro položky (mám / koupeno) ===== */
+  /* ==== Checkbox (mám/koupeno) ==== */
   function toggleItem(dayIso: string, mealKey: keyof DayMeals, itemId: string) {
     setPlan((prev) => {
       const day = prev[dayIso];
       if (!day) return prev;
       if (mealKey === "extra") {
-        const updated = day.extra.map((it) =>
-          it.id === itemId ? { ...it, checked: !it.checked } : it
-        );
+        const updated = day.extra.map((it) => (it.id === itemId ? { ...it, checked: !it.checked } : it));
         return { ...prev, [dayIso]: { ...day, extra: updated } };
       }
       const section = day[mealKey];
-      const updated = section.items.map((it) =>
-        it.id === itemId ? { ...it, checked: !it.checked } : it
-      );
+      const updated = section.items.map((it) => (it.id === itemId ? { ...it, checked: !it.checked } : it));
       return { ...prev, [dayIso]: { ...day, [mealKey]: { ...section, items: updated } } };
     });
   }
 
-  /* ===== Další suroviny (dropdown z mých surovin) ===== */
+  /* ==== Další suroviny ==== */
   function setExtraForm(dayIso: string, patch: Partial<ExtraForm>) {
     setExtraForms((prev) => ({ ...prev, [dayIso]: { ...prev[dayIso], ...patch } }));
   }
-
   function addExtra(dayIso: string) {
     const form = extraForms[dayIso];
     if (!form || !form.ingredientId) return;
-
     const ing = ingredients.find((i) => i.id === form.ingredientId);
     if (!ing) return;
 
@@ -479,10 +459,8 @@ export default function NakupniSeznamPage() {
       return { ...prev, [dayIso]: { ...day, extra: [...day.extra, newItem] } };
     });
 
-    // reset mini-formu
     setExtraForm(dayIso, { ingredientId: "", amount: "", unit: form.unit });
   }
-
   function removeExtra(dayIso: string, itemId: string) {
     setPlan((prev) => {
       const day = prev[dayIso];
@@ -491,28 +469,21 @@ export default function NakupniSeznamPage() {
     });
   }
 
-  /* ===== Souhrn: sečti všechny NEzaškrtnuté položky za celý týden ===== */
-  type SumKey = `${string}||${string}||${Jednotka}`; // name||vendor||unit
+  /* ==== Souhrn nezaškrtnutých ==== */
+  type SumKey = `${string}||${string}||${Jednotka}`;
   const summary = useMemo(() => {
     const map = new Map<SumKey, number>();
     const push = (name: string, vendor: string | undefined, unit: Jednotka, amount: number) => {
       const key: SumKey = `${name}||${vendor ?? ""}||${unit}`;
       map.set(key, (map.get(key) ?? 0) + amount);
     };
-
     for (const iso of Object.keys(plan)) {
       const d = plan[iso];
-      const meals: Array<PlannedMeal> = [d.snidane, d.obed, d.vecere];
-      for (const m of meals) {
-        for (const it of m.items) {
-          if (!it.checked) push(it.name, it.vendor, it.unit, it.amount);
-        }
+      for (const m of [d.snidane, d.obed, d.vecere]) {
+        for (const it of m.items) if (!it.checked) push(it.name, it.vendor, it.unit, it.amount);
       }
-      for (const it of d.extra) {
-        if (!it.checked) push(it.name, it.vendor, it.unit, it.amount);
-      }
+      for (const it of d.extra) if (!it.checked) push(it.name, it.vendor, it.unit, it.amount);
     }
-
     const rows = Array.from(map.entries()).map(([key, amount]) => {
       const [name, vendor, unit] = key.split("||") as [string, string, Jednotka];
       return { name, vendor: vendor || undefined, unit, amount };
@@ -521,8 +492,7 @@ export default function NakupniSeznamPage() {
     return rows;
   }, [plan]);
 
-  /* ===================== UI ===================== */
-
+  /* ==== UI ==== */
   if (loading) {
     return (
       <main className="max-w-5xl mx-auto p-6">
@@ -592,12 +562,7 @@ export default function NakupniSeznamPage() {
       <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {weekDays.map((day) => {
           const iso = toIsoDate(day);
-          const dayPlan = plan[iso] ?? {
-            snidane: { items: [] },
-            obed: { items: [] },
-            vecere: { items: [] },
-            extra: [],
-          };
+          const dayPlan = plan[iso] ?? emptyMeals();
           return (
             <article key={iso} className="card p-4 space-y-4">
               <div className="flex items-center justify-between">
@@ -605,17 +570,13 @@ export default function NakupniSeznamPage() {
                 <button
                   className="text-xs text-emerald-700 hover:underline"
                   onClick={() =>
-                    setPlan((p) => ({
-                      ...p,
-                      [iso]: { snidane: { items: [] }, obed: { items: [] }, vecere: { items: [] }, extra: [] },
-                    }))
+                    setPlan((p) => ({ ...p, [iso]: emptyMeals() }))
                   }
                 >
                   Vyčistit den
                 </button>
               </div>
 
-              {/* 3 jídla */}
               {(
                 [
                   ["Snídaně", "snidane"],
@@ -655,7 +616,7 @@ export default function NakupniSeznamPage() {
                             />
                             <span className={it.checked ? "line-through text-gray-400" : ""}>
                               {it.name}
-                              {it.vendor ? ` (${it.vendor})` : ""} — {it.amount} {it.unit}
+                              {vendorLabel(it.vendor)} — {it.amount} {it.unit}
                             </span>
                           </li>
                         ))}
@@ -669,7 +630,6 @@ export default function NakupniSeznamPage() {
               <div className="border rounded-lg p-3 bg-white/70">
                 <div className="font-medium mb-2">Další suroviny</div>
 
-                {/* Mini-form */}
                 <div className="flex items-center gap-2 flex-wrap">
                   <select
                     className="border rounded px-2 py-1"
@@ -679,7 +639,8 @@ export default function NakupniSeznamPage() {
                     <option value="">– vybrat z mých surovin –</option>
                     {ingredients.map((ing) => (
                       <option key={ing.id} value={ing.id}>
-                        {ing.name} {igVendor(ing.vendor)}
+                        {ing.name}
+                        {vendorLabel(ing.vendor)}
                       </option>
                     ))}
                   </select>
@@ -704,7 +665,6 @@ export default function NakupniSeznamPage() {
                   </button>
                 </div>
 
-                {/* Seznam extra */}
                 {dayPlan.extra.length > 0 && (
                   <ul className="mt-3 space-y-2">
                     {dayPlan.extra.map((it) => (
@@ -717,7 +677,7 @@ export default function NakupniSeznamPage() {
                         />
                         <span className={it.checked ? "line-through text-gray-400" : ""}>
                           {it.name}
-                          {it.vendor ? ` (${it.vendor})` : ""} — {it.amount} {it.unit}
+                          {vendorLabel(it.vendor)} — {it.amount} {it.unit}
                         </span>
                         <button
                           className="ml-auto text-sm text-red-600 hover:underline"
@@ -737,7 +697,7 @@ export default function NakupniSeznamPage() {
         })}
       </section>
 
-      {/* Celkový souhrn – bez checkboxů, jen součet nezaškrtnutých */}
+      {/* Celkový souhrn */}
       <section className="card p-4">
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-semibold">Souhrn na nákup (nezaškrtnuté položky)</h2>
@@ -760,7 +720,7 @@ export default function NakupniSeznamPage() {
               >
                 <span className="truncate">
                   {row.name}
-                  {row.vendor ? ` (${row.vendor})` : ""}
+                  {vendorLabel(row.vendor)}
                 </span>
                 <span className="font-medium whitespace-nowrap">
                   {row.amount} {row.unit}
@@ -772,9 +732,4 @@ export default function NakupniSeznamPage() {
       </section>
     </main>
   );
-}
-
-/* ===== drobný helper pro vendor render ===== */
-function igVendor(vendor: string | null) {
-  return vendor ? `(${vendor})` : "";
 }

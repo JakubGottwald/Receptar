@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabaseClient";
 
-/* ============== Typy ============== */
+/* ===================== Typy ===================== */
 type Jednotka = "g" | "ml" | "ks";
 
 type RecipeRow = {
@@ -53,7 +53,7 @@ type DayMeals = {
   extra: PlannedItem[];
 };
 
-type WeekPlan = Record<string, DayMeals>; // YYYY-MM-DD (Po..Ne)
+type WeekPlan = Record<string, DayMeals>; // YYYY-MM-DD -> den
 
 type StoredPlan = {
   version: 1;
@@ -68,10 +68,11 @@ type MealPlanRow = {
 
 type ExtraForm = { ingredientId: string; amount: string; unit: Jednotka };
 
-/* ============== Pomocné funkce ============== */
+/* ===================== Pomocné funkce ===================== */
 const asStringArray = (x: unknown): string[] =>
   Array.isArray(x) ? x.filter((v): v is string => typeof v === "string") : [];
 
+/** "100 g Jogurt bílý (Lidl)" => { amount:100, unit:"g", name:"Jogurt bílý", vendor:"Lidl" } */
 function parseLine(line: string): ParsedLine {
   const m = line.match(/^(\d+)\s*(g|ml|ks)\s+(.+?)(?:\s*\(([^)]+)\))?$/i);
   if (m) {
@@ -85,7 +86,7 @@ function parseLine(line: string): ParsedLine {
   return { amount: 1, unit: "ks", name: line };
 }
 
-/* ——— UTC helpers (stabilní klíče napříč časovými zónami) ——— */
+/* —— UTC helpers pro stabilní klíče —— */
 function utcDate(y: number, m: number, d: number) {
   return new Date(Date.UTC(y, m, d));
 }
@@ -126,6 +127,7 @@ function emptyMeals(): DayMeals {
     extra: [],
   };
 }
+
 function defaultPlan(days: Date[]): WeekPlan {
   const p: WeekPlan = {};
   for (const d of days) p[toIsoDateUTC(d)] = emptyMeals();
@@ -144,7 +146,7 @@ function countUncheckedItems(plan: WeekPlan) {
   return c;
 }
 
-/* ============== LocalStorage (verzované) ============== */
+/* ===================== LocalStorage ===================== */
 function storageKey(uid: string, weekStartISO: string) {
   return `shopping-week:v1:${uid}:${weekStartISO}`;
 }
@@ -187,7 +189,7 @@ function deleteStored(uid: string, weekStartISO: string) {
   }
 }
 
-/* ============== Cloud (Supabase) ============== */
+/* ===================== Supabase (cloud) ===================== */
 async function loadPlanFromCloud(
   supabase: ReturnType<typeof createClient>,
   ownerId: string,
@@ -214,7 +216,7 @@ async function savePlanToCloud(
     .upsert(
       {
         owner_id: ownerId,
-        week_start: weekStartISO,
+        week_start: weekStartISO, // ve schématu by to mělo být DATE
         plan,
         updated_at: new Date().toISOString(),
       },
@@ -222,13 +224,13 @@ async function savePlanToCloud(
     );
 }
 
-/* ============== Komponenta ============== */
+/* ===================== Komponenta ===================== */
 export default function NakupniSeznamPage() {
   const supabase = useMemo(() => createClient(), []);
   const [userId, setUserId] = useState<string | null>(null);
   const [authResolved, setAuthResolved] = useState(false);
 
-  // Výběr týdne – základ je 1.9.2025 (Po), vše v UTC
+  // Týdenní výběr (UTC) – základ je 1. 9. 2025
   const baseMondayUTC = useMemo(() => mondayOfUTC(utcDate(2025, 8, 1)), []);
   const [weekIndex, setWeekIndex] = useState(0);
   const weekStartUTC = useMemo(() => addDaysUTC(baseMondayUTC, weekIndex * 7), [baseMondayUTC, weekIndex]);
@@ -244,7 +246,7 @@ export default function NakupniSeznamPage() {
   const [hydrated, setHydrated] = useState(false);
   const [syncing, setSyncing] = useState<"idle" | "saving" | "loading">("idle");
 
-  // 1) Zjisti přihlášení a zůstaň v syncu
+  // 1) Auth – držet v syncu a vědět, kdy je vyřešené
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -263,7 +265,7 @@ export default function NakupniSeznamPage() {
     };
   }, [supabase]);
 
-  // 2) Načti recepty, ingredience a PLÁN (merge anon/user/cloud) až když víme, zda je uživatel
+  // 2) Načti recepty/ingredience a MERGE plánu (anon/local/cloud) pro aktuální týden
   useEffect(() => {
     if (!authResolved) return;
     let mounted = true;
@@ -271,7 +273,7 @@ export default function NakupniSeznamPage() {
       setLoading(true);
       setHydrated(false);
 
-      // Recepty (RLS)
+      // Recepty
       const { data: rcp } = await supabase
         .from("recipes")
         .select("id, owner_id, nazev, suroviny")
@@ -285,7 +287,7 @@ export default function NakupniSeznamPage() {
         })) ?? [];
       setRecipes(recs);
 
-      // Ingredience (jen moje)
+      // Moje suroviny
       if (userId) {
         const { data: ingr } = await supabase
           .from("ingredients")
@@ -298,40 +300,39 @@ export default function NakupniSeznamPage() {
         setIngredients([]);
       }
 
-      // ==== Načtení a MERGE plánu ====
+      // ==== Merge plánu ====
       const empty = defaultPlan(weekDaysUTC);
-
       const localAnon = readStored("anon", weekStartISO);
       const localUser = userId ? readStored(userId, weekStartISO) : null;
       const remote = userId ? await loadPlanFromCloud(supabase, userId, weekStartISO) : null;
 
       const pick = (): WeekPlan => {
-        const candidates: Array<{ src: "anon" | "local" | "remote"; ts: number; plan: WeekPlan }> = [];
-        if (localAnon) candidates.push({ src: "anon", ts: Date.parse(localAnon.updatedAt), plan: localAnon.plan });
-        if (localUser) candidates.push({ src: "local", ts: Date.parse(localUser.updatedAt), plan: localUser.plan });
-        if (remote) candidates.push({ src: "remote", ts: Date.parse(remote.updated_at), plan: remote.plan });
-        if (candidates.length === 0) return empty;
-        candidates.sort((a, b) => {
-          if (b.ts !== a.ts) return b.ts - a.ts;
-          return countUncheckedItems(b.plan) - countUncheckedItems(a.plan);
+        const cands: Array<{ src: string; ts: number; plan: WeekPlan }> = [];
+        if (localAnon) cands.push({ src: "anon", ts: Date.parse(localAnon.updatedAt), plan: localAnon.plan });
+        if (localUser) cands.push({ src: "local", ts: Date.parse(localUser.updatedAt), plan: localUser.plan });
+        if (remote) cands.push({ src: "remote", ts: Date.parse(remote.updated_at), plan: remote.plan });
+        if (cands.length === 0) return empty;
+        cands.sort((a, b) => {
+          if (b.ts !== a.ts) return b.ts - a.ts; // novější
+          return countUncheckedItems(b.plan) - countUncheckedItems(a.plan); // víc nezaškrtnutých
         });
-        return candidates[0].plan;
+        return cands[0].plan;
       };
 
       const merged = pick();
       setPlan(merged);
 
       if (userId) {
-        writeStored(userId, weekStartISO, merged);
+        writeStored(userId, weekStartISO, merged);      // local USER
+        if (localAnon) deleteStored("anon", weekStartISO); // odmaž anon kopii pro týden
         try {
           setSyncing("loading");
           await savePlanToCloud(supabase, userId, weekStartISO, merged);
         } finally {
           setSyncing("idle");
         }
-        if (localAnon) deleteStored("anon", weekStartISO);
       } else {
-        writeStored("anon", weekStartISO, merged);
+        writeStored("anon", weekStartISO, merged);       // local ANON
       }
 
       // init mini formulářů
@@ -348,21 +349,40 @@ export default function NakupniSeznamPage() {
     };
   }, [authResolved, userId, supabase, weekStartISO, weekDaysUTC]);
 
-  // 3) Persist změn — po hydrataci.
+  // 3) Persist změn — lokálně hned, do cloudu s debounce; flush na visibilitychange
   useEffect(() => {
     if (!hydrated) return;
     const uid = userId ?? "anon";
+
+    // lokál hned (to je klíčové pro refresh)
     writeStored(uid, weekStartISO, plan);
 
     if (!userId) return;
+
+    // cloud s debounce
     setSyncing("saving");
     const t = setTimeout(() => {
       void savePlanToCloud(supabase, userId, weekStartISO, plan).finally(() => setSyncing("idle"));
     }, 400);
-    return () => clearTimeout(t);
+
+    // flush při skrytí/zavření tabu
+    const flush = () => {
+      clearTimeout(t);
+      savePlanToCloud(supabase, userId, weekStartISO, plan).catch(() => {});
+    };
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flush();
+    });
+    window.addEventListener("beforeunload", flush);
+
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener("beforeunload", flush);
+      document.removeEventListener("visibilitychange", flush as any);
+    };
   }, [plan, hydrated, userId, weekStartISO, supabase]);
 
-  /* ============== Akce UI ============== */
+  /* ===================== Akce UI ===================== */
   function setMealRecipe(dayIso: string, meal: keyof Omit<DayMeals, "extra">, recipeId: string) {
     setPlan((prev) => {
       const day = prev[dayIso] ?? emptyMeals();
@@ -435,7 +455,7 @@ export default function NakupniSeznamPage() {
     });
   }
 
-  // Souhrn nezaškrtnutých
+  // Souhrn (nezaškrtnuté)
   type SumKey = `${string}||${string}||${Jednotka}`;
   const summary = useMemo(() => {
     const map = new Map<SumKey, number>();
@@ -458,7 +478,7 @@ export default function NakupniSeznamPage() {
     return rows;
   }, [plan]);
 
-  /* ============== UI ============== */
+  /* ===================== UI ===================== */
   if (loading) {
     return (
       <main className="max-w-5xl mx-auto p-6">
@@ -479,9 +499,8 @@ export default function NakupniSeznamPage() {
             </Link>
             .
           </p>
-          <p className="text-sm text-gray-500 mt-2">
-            Tvé volby se dočasně ukládají do tohoto zařízení. Po přihlášení se automaticky
-            přesunou k účtu a budou k dispozici všude.
+          <p className="text-sm text-gray-500 mt-1">
+            Volby se ukládají do tohoto zařízení. Po přihlášení se automaticky přenesou k účtu a uvidíš je všude.
           </p>
         </div>
       </main>
@@ -615,7 +634,7 @@ export default function NakupniSeznamPage() {
                     <option value="">– vybrat z mých surovin –</option>
                     {ingredients.map((ing) => (
                       <option key={ing.id} value={ing.id}>
-                        {ing.name} {igVendor(ing.vendor)}
+                        {ing.name} {ing.vendor ? `(${ing.vendor})` : ""}
                       </option>
                     ))}
                   </select>
@@ -707,9 +726,4 @@ export default function NakupniSeznamPage() {
       </section>
     </main>
   );
-}
-
-/* ============== Pom. render funkce ============== */
-function igVendor(v?: string | null) {
-  return v ? `(${v})` : "";
 }

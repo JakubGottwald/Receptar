@@ -232,7 +232,7 @@ export default function NakupniSeznamPage() {
 
   // 3) plán týdne
   const [plan, setPlan] = useState<WeekPlan>({});
-  const [hydrated, setHydrated] = useState(false); // KLÍČOVÉ: ukládáme až po načtení
+  const [hydrated, setHydrated] = useState(false); // po načtení local/cloud = true
 
   // 4) formuláře pro "Další suroviny" (per den)
   const [extraForms, setExtraForms] = useState<Record<string, ExtraForm>>({}); // key = isoDay
@@ -258,7 +258,7 @@ export default function NakupniSeznamPage() {
     let mounted = true;
     (async () => {
       setLoading(true);
-      setHydrated(false); // budeme znovu hydratovat
+      setHydrated(false); // budeme znovu hydratovat při změně týdne / uživatele
 
       // Recepty (RLS vrátí jen tvoje)
       const { data: rcp } = await supabase
@@ -268,11 +268,12 @@ export default function NakupniSeznamPage() {
 
       if (!mounted) return;
 
-      const recs = (rcp as RecipeRow[] | null)?.map((r) => ({
-        id: r.id,
-        nazev: r.nazev ?? "(bez názvu)",
-        suroviny: asStringArray(r.suroviny),
-      })) ?? [];
+      const recs =
+        (rcp as RecipeRow[] | null)?.map((r) => ({
+          id: r.id,
+          nazev: r.nazev ?? "(bez názvu)",
+          suroviny: asStringArray(r.suroviny),
+        })) ?? [];
       setRecipes(recs);
 
       // Moje suroviny (jen vlastník)
@@ -313,9 +314,10 @@ export default function NakupniSeznamPage() {
         if (!local && !remote) return empty;
         if (local && !remote) return local.plan;
         if (!local && remote) return remote.plan;
-        // oba existují
+
         const localTs = new Date(local!.updatedAt).getTime();
         const remoteTs = new Date(remote!.updated_at).getTime();
+
         if (remoteTs === localTs) {
           const lc = countUncheckedItems(local!.plan);
           const rc = countUncheckedItems(remote!.plan);
@@ -352,13 +354,15 @@ export default function NakupniSeznamPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase, userId, weekStartISO]);
 
-  // Ukládej změny: localStorage vždy; cloud s debounce — ALE až po hydrataci!
+  // Ukládej změny:
+  // - localStorage VŽDY (i během hydratace, aby se nic neztratilo)
+  // - do Supabase s debounce, ale až po hydrataci a jen pro přihlášené
   useEffect(() => {
-    if (!hydrated) return; // klíčová brzda
     const uid = userId ?? "anon";
     writeStoredPlan(uid, weekStartISO, plan);
 
-    if (!userId) return; // nepřihlášený nepushuje do cloudu
+    if (!userId) return;       // nepřihlášený nepushuje do cloudu
+    if (!hydrated) return;     // cloud až po hydrataci
 
     setSyncing("saving");
     const t = setTimeout(() => {
@@ -367,7 +371,7 @@ export default function NakupniSeznamPage() {
       );
     }, 500);
     return () => clearTimeout(t);
-  }, [plan, hydrated, userId, weekStartISO, supabase]);
+  }, [plan, userId, weekStartISO, hydrated, supabase]);
 
   /* ===== Helpers pro prázdný týden ===== */
   function emptyMeals(): DayMeals {
@@ -390,6 +394,18 @@ export default function NakupniSeznamPage() {
     setPlan((prev) => {
       const day = prev[dayIso] ?? emptyMeals();
       const r = recipes.find((x) => x.id === recipeId);
+
+      // podpora „vyprázdnit výběr“
+      if (!recipeId) {
+        return {
+          ...prev,
+          [dayIso]: {
+            ...day,
+            [meal]: { recipeId: undefined, items: [] },
+          },
+        };
+      }
+
       const items: PlannedItem[] = r
         ? r.suroviny.map((line) => {
             const parsed = parseLine(line);
@@ -404,6 +420,7 @@ export default function NakupniSeznamPage() {
             };
           })
         : [];
+
       return {
         ...prev,
         [dayIso]: {
@@ -662,7 +679,7 @@ export default function NakupniSeznamPage() {
                     <option value="">– vybrat z mých surovin –</option>
                     {ingredients.map((ing) => (
                       <option key={ing.id} value={ing.id}>
-                        {ing.name} {ing.vendor ? `(${ing.vendor})` : ""}
+                        {ing.name} {igVendor(ing.vendor)}
                       </option>
                     ))}
                   </select>
@@ -755,4 +772,9 @@ export default function NakupniSeznamPage() {
       </section>
     </main>
   );
+}
+
+/* ===== drobný helper pro vendor render ===== */
+function igVendor(vendor: string | null) {
+  return vendor ? `(${vendor})` : "";
 }
